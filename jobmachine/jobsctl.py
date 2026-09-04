@@ -88,7 +88,8 @@ REMOTE_RE = re.compile(r"remote|anywhere|distributed|work from home", re.I)
 FOREIGN_RE = re.compile(
     r"(canada|emea|apac|\buk\b|united kingdom|europe|australia|india|latam"
     r"|mexico|germany|france|ireland|philippines|brazil|poland|spain"
-    r"|netherlands|singapore|japan|israel)",
+    r"|netherlands|singapore|japan|israel|ontario|toronto|mississauga"
+    r"|vancouver|montreal|london\b|dublin|berlin|paris|amsterdam)",
     re.I,
 )
 US_RE = re.compile(r"(\bus\b|\bu\.s\.|usa|united states|north america|\bna\b)", re.I)
