@@ -719,7 +719,11 @@ def cmd_prep(args):
 
     healthcareish = bool(HEALTHCARE_HINTS.search(row.get("company", ""))
                          or re.search(r"health|clinic|patient|provider|payer", tl))
-    master = "b" if healthcareish else "a"
+    # role bucket beats industry: ops/technical roles always get Master A
+    # (the ShiftKey lesson: healthcare company + RevOps title = A, not B)
+    ops_bucket = bucket(jd["title"]) in {
+        "RevOps", "GTM Ops", "Growth", "AI Ops", "Marketing Ops", "BizOps"}
+    master = "a" if ops_bucket else ("b" if healthcareish else "a")
     resume_path = args.resume
     if not resume_path:
         hits = sorted((DATA / "private").glob(f"resume_master_{master}*.txt"))
