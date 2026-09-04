@@ -793,6 +793,70 @@ def cmd_prep(args):
     print(f"\nwrote {out}")
 
 
+def cmd_digest(args):
+    """Compose the daily brief: scoreboard, new qualifiers, approvals, follow-ups.
+
+    Output is markdown on stdout (and data/digest-latest.md). The batch-approve
+    flow consumes the 'awaiting approval' keys; Mitchell replies 'approve'.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    state = load_json(STATE_FILE, {"runs": [], "seen": {}, "rejected": {}})
+    last_digest = state.get("last_digest", "1970-01-01T00:00:00Z")
+    rows = list(csv.DictReader(JOBS_CSV.open())) if JOBS_CSV.exists() else []
+    tracker_file = DATA / "private" / "tracker.csv"
+    tracker = list(csv.DictReader(tracker_file.open())) if tracker_file.exists() else []
+
+    applied = [t for t in tracker if t.get("status") == "Applied"]
+    followups = [t for t in applied
+                 if t.get("followup_due") and t["followup_due"] <= today]
+    packets = {p.stem.replace("__", ":", 2) for p in (DATA / "packets").glob("*.md")}
+    applied_companies = {t["company"].lower() for t in applied}
+    awaiting = sorted(
+        (r for r in rows if r["key"] in packets
+         and r["company"].lower() not in applied_companies),
+        key=lambda r: -int(r["score"]))
+    fresh = sorted(
+        (r for r in rows
+         if state["seen"].get(r["key"], {}).get("first_seen", "") > last_digest),
+        key=lambda r: -int(r["score"]))
+
+    lines = [f"# Job Machine digest - {today}", ""]
+    lines.append(f"## Scoreboard (deadline: signed offer by 2026-09-24)")
+    lines.append(f"- applied: {len(applied)}   follow-ups due: {len(followups)}   "
+                 f"open leads tracked: {len(rows)}")
+    if followups:
+        lines.append("\n## Follow-ups due (5-7 business days, no reply)")
+        for t in followups:
+            lines.append(f"- {t['company']} - {t['role']} (applied {t['applied_date']})"
+                         f" -> draft follow-up ready for your send")
+    if awaiting:
+        lines.append("\n## Awaiting your approval (packets ready)")
+        for r in awaiting[:15]:
+            lines.append(f"- [{r['score']}] {r['company']} - {r['title']} "
+                         f"({r['comp'] or 'comp not posted'})  key={r['key']}")
+    if fresh:
+        lines.append(f"\n## New qualifiers since last digest ({len(fresh)})")
+        for r in fresh[:args.top]:
+            lines.append(f"- [{r['score']}] {r['company']} - {r['title']} | "
+                         f"{r['location'][:40]} | {r['comp'] or 'comp not posted'}")
+        if len(fresh) > args.top:
+            lines.append(f"- ... and {len(fresh) - args.top} more in data/jobs.csv")
+    if state["runs"]:
+        last = state["runs"][-1]
+        fails = last.get("board_failures", [])
+        if fails:
+            lines.append(f"\n## LOUD: {len(fails)} board failures last sweep")
+            lines += [f"- {b}" for b in fails]
+        lines.append(f"\n_last sweep {last['at']}: {last['passed']} passed, "
+                     f"{last['new']} new, drops {last['drops']}_")
+    out = "\n".join(lines) + "\n"
+    (DATA / "digest-latest.md").write_text(out)
+    print(out)
+    if not args.dry_run:
+        state["last_digest"] = now_iso()
+        save_json(STATE_FILE, state)
+
+
 def cmd_reject(args):
     """Judgment reject: never show this posting again (survives every sweep)."""
     state = load_json(STATE_FILE, {"runs": [], "seen": {}, "rejected": {}})
@@ -841,6 +905,12 @@ def main() -> None:
     s.add_argument("resume")
     s.add_argument("key")
     s.set_defaults(fn=cmd_screen)
+
+    dg = sub.add_parser("digest")
+    dg.add_argument("--top", type=int, default=20)
+    dg.add_argument("--dry-run", action="store_true",
+                    help="don't advance the last_digest marker")
+    dg.set_defaults(fn=cmd_digest)
 
     pr = sub.add_parser("prep")
     pr.add_argument("key")
