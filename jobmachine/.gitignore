@@ -1,0 +1,6 @@
+# Personal + third-party data never enters this public repo.
+data/private/
+resumes/
+answers.json
+*.docx
+*.pdf

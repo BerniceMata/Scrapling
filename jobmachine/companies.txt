@@ -1,0 +1,292 @@
+# Job Machine seed universe (waves 1-3). One company per line. '#' = comment.
+# Rebuilt Sep 4, 2026 from the handoff + Mitchell's seed lists + healthtech/GTM additions.
+
+# --- Known-good from the Cowork sweep (tracker rows) ---
+Headway
+ShiftKey
+Natera
+Vanta
+Gusto
+Commure
+Affirm
+Clipboard Health
+Toast
+Mercury
+Ramp
+Nabla
+Block
+Plaid
+Maven Clinic
+Virta Health
+Garner Health
+Carrot Fertility
+Charlie Health
+Truemed
+Human Interest
+Justworks
+Datadog
+Lithic
+
+# --- Healthcare IT / RCM / health AI ---
+R1 RCM
+Veradigm
+Epic
+Oracle Health
+Experian Health
+Signify Health
+Abridge
+Ambience Healthcare
+Aidoc
+Tempus AI
+Flatiron Health
+Zocdoc
+Ro
+Hims and Hers
+Included Health
+Omada Health
+Sword Health
+Hinge Health
+Spring Health
+Lyra Health
+Cedar
+Turquoise Health
+Wheel
+Medallion
+SmarterDx
+Grow Therapy
+Rula
+Alma
+Talkiatry
+Octave
+Oscar Health
+Devoted Health
+Clover Health
+Datavant
+Innovaccer
+Arcadia
+PointClickCare
+WellSky
+Athenahealth
+ModMed
+Tebra
+Weave
+Solv
+Luma Health
+Artera
+Memora Health
+Notable
+Infinitus
+Hyro
+Qventus
+LeanTaaS
+Regard
+Elation Health
+Healthie
+Zus Health
+Particle Health
+Ribbon Health
+Nourish
+Equip Health
+Brightline
+Cortica
+Author Health
+Firefly Health
+Transcarent
+Sana Benefits
+Gravie
+Collective Health
+Nava Benefits
+Rightway
+Sword
+Big Health
+NOCD
+Parallel Learning
+Hazel Health
+DUOS
+Papa
+Honor
+Tomorrow Health
+Synapse Health
+Prochant
+Medely
+IntelyCare
+Trusted Health
+Incredible Health
+Vivian Health
+Nomad Health
+
+# --- Diagnostics / med device / pharma ---
+Guardant Health
+Exact Sciences
+Myriad Genetics
+Illumina
+Invitae
+Labcorp
+Quest Diagnostics
+Hologic
+Stryker
+Medtronic
+Abbott
+Boston Scientific
+GE HealthCare
+Siemens Healthineers
+Intuitive Surgical
+Getinge
+AstraZeneca
+Alexion
+Inizio Engage
+Grail
+Color Health
+Everly Health
+BillionToOne
+Caris Life Sciences
+NeoGenomics
+
+# --- Fintech ---
+Fiserv
+FIS
+Jack Henry
+Alkami
+NCR Voyix
+Stripe
+Adyen
+PayPal
+Bill.com
+Brex
+HighRadius
+Tipalti
+Finastra
+Q2
+Experian
+Equifax
+TransUnion
+Marqeta
+Modern Treasury
+Unit
+Lithic
+Mercury
+Melio
+Navan
+Airbase
+Ramp
+
+# --- Enterprise tech / security / data ---
+Pure Storage
+Sophos
+Cisco
+Palo Alto Networks
+CrowdStrike
+SentinelOne
+Okta
+Snowflake
+Datadog
+Dynatrace
+ServiceNow
+Salesforce
+Oracle
+Microsoft
+AWS
+Google Cloud
+Lenovo
+Dell
+IBM
+Splunk
+Zscaler
+Rubrik
+NetApp
+Wiz
+Abnormal Security
+Vercel
+Retool
+Airtable
+Notion
+Figma
+Webflow
+Zapier
+Calendly
+Loom
+Grammarly
+1Password
+Postman
+HashiCorp
+GitLab
+Twilio
+Sendbird
+Intercom
+Front
+Zendesk
+
+# --- GTM / sales tech (Master A sweet spot) ---
+Clay
+Apollo.io
+Instantly
+Common Room
+Momentum
+Copy.ai
+Jasper
+Gong
+Outreach
+Salesloft
+ZoomInfo
+Chili Piper
+Warmly
+Amplemarket
+Smartlead
+HeyGen
+Synthesia
+Attention
+Nooks
+Orum
+Regie.ai
+Docket
+Default
+Pocus
+Mutiny
+Clari
+People.ai
+Rattle
+LeanData
+Openprise
+Syncari
+Census
+Hightouch
+Segment
+
+# --- Adtech / media / telecom ---
+Koddi
+The Trade Desk
+RTB House
+Comcast
+Spectrum
+AT&T Business
+Verizon Business
+T-Mobile for Business
+Cox Media
+Sinclair
+Nexstar
+Audacy
+iHeartMedia
+Criteo
+Taboola
+Outbrain
+Roku
+Yelp
+Thryv
+Hibu
+
+# --- DFW / Texas footprint ---
+o9 Solutions
+OneRail
+Take Command
+Sana
+Olera
+Dave
+SignEasy
+Bestow
+StackPath
+Island
+Rex
+Homeward
+Sunroom
+Common Desk
+CBRE
