@@ -703,6 +703,92 @@ def cmd_doctor(args):
     sys.exit(1 if failures else 0)
 
 
+def cmd_prep(args):
+    """Build a review packet for one job: reality gate, coverage, answers, next steps.
+
+    Shadow mode: this produces the packet Mitchell reviews. Nothing submits here.
+    """
+    jd = load_jd(args.key)
+    text, tl = jd["text"], jd["text"].lower()
+    row = {}
+    if JOBS_CSV.exists():
+        for r in csv.DictReader(JOBS_CSV.open()):
+            if r["key"] == args.key:
+                row = r
+                break
+
+    healthcareish = bool(HEALTHCARE_HINTS.search(row.get("company", ""))
+                         or re.search(r"health|clinic|patient|provider|payer", tl))
+    master = "b" if healthcareish else "a"
+    resume_path = args.resume
+    if not resume_path:
+        hits = sorted((DATA / "private").glob(f"resume_master_{master}*.txt"))
+        resume_path = str(hits[0]) if hits else None
+
+    lines = [f"# Application packet: {row.get('company', '?')} - {jd['title']}",
+             f"key: {args.key}",
+             f"location: {jd['location']}   comp: {row.get('comp', 'not posted')}",
+             f"posting: {row.get('url', '(run discover for url)')}", ""]
+
+    # reality gate
+    problems = []
+    years = [int(m.group(1)) for m in YEARS_RE.finditer(text) if int(m.group(1)) <= 15]
+    if years and max(years) >= 4:
+        problems.append(f"experience ask up to {max(years)} years - verify hard requirement")
+    if ONSITE_RE.search(text) and not TX_OK.search(text):
+        problems.append("onsite/hybrid language, no TX city - verify location")
+    lines.append("## Reality gate")
+    lines += [f"- ! {p}" for p in problems] or ["- CLEAR"]
+
+    # coverage
+    lines.append(f"\n## Resume: Master {master.upper()}  ({resume_path or 'RESUME FILE MISSING'})")
+    if resume_path and Path(resume_path).exists():
+        resume = Path(resume_path).read_text().lower()
+        in_jd = {t: p for t, p in LEXICON.items() if re.search(p, tl)}
+        matched = {t for t, p in in_jd.items() if re.search(p, resume)}
+        missing = sorted(set(in_jd) - matched)
+        pct = round(100 * len(matched) / len(in_jd)) if in_jd else 0
+        lines.append(f"- ATS coverage {pct}% ({len(matched)}/{len(in_jd)})")
+        if missing:
+            lines.append(f"- missing (add only where truthful): {', '.join(missing)}")
+
+    # answers
+    ans_file = DATA / "private" / "answers.json"
+    lines.append("\n## Standard answers (from bank)")
+    if ans_file.exists():
+        bank = json.loads(ans_file.read_text())
+        ident, scr = bank["identity"], bank["screening"]
+        lines += [
+            f"- name: {ident['legal_name']}  email: {ident['email']}  phone: {ident['phone']}",
+            f"- location: {ident['location']}  linkedin: {ident['linkedin']}",
+            f"- authorized to work in US: {scr['authorized_to_work_us']}  sponsorship: {scr['require_sponsorship']}",
+            f"- start: {scr['start_date']}",
+            f"- salary line: {bank['salary']['expectation_line']}",
+            "- EEO/demographic questions: MITCHELL_DECIDES (never auto-answered)",
+        ]
+    else:
+        lines.append("- ANSWER BANK MISSING (data/private/answers.json)")
+
+    lines += [
+        "\n## Cover letter",
+        "- Only if required or score 75+. Story-driven: the problem this company",
+        "  solves, the unique thing they do, and what Mitchell is building. No em",
+        "  dashes. Never template slop.",
+        "\n## Truth gate reminders",
+        "- No Salesforce claim. HubSpot = 1 year. Degree spelled out in full.",
+        "- Council gates (skim, pain match) run in chat before submit.",
+        "\n## Submit",
+        "- SHADOW MODE: Mitchell approves this packet, then submission happens",
+        f"- apply here: {row.get('url', jd.get('key'))}",
+    ]
+
+    out = DATA / "packets" / f"{args.key.replace(':', '__')}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print(f"\nwrote {out}")
+
+
 def cmd_reject(args):
     """Judgment reject: never show this posting again (survives every sweep)."""
     state = load_json(STATE_FILE, {"runs": [], "seen": {}, "rejected": {}})
@@ -751,6 +837,11 @@ def main() -> None:
     s.add_argument("resume")
     s.add_argument("key")
     s.set_defaults(fn=cmd_screen)
+
+    pr = sub.add_parser("prep")
+    pr.add_argument("key")
+    pr.add_argument("--resume", help="override resume text file for coverage check")
+    pr.set_defaults(fn=cmd_prep)
 
     rj = sub.add_parser("reject")
     rj.add_argument("key")
