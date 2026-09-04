@@ -290,3 +290,12 @@ Homeward
 Sunroom
 Common Desk
 CBRE
+
+# --- DFW radius sweep finds (Sep 4) ---
+Caliber Healthcare Solutions
+Syneos Health
+EVERSANA
+Amedisys
+Vivo Infusion
+Organon
+Zimmer Biomet
