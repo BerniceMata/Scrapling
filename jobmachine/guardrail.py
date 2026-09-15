@@ -53,6 +53,8 @@ import unicodedata
 # 40%, 1.2M, $500k, 3x, 12,000
 _NUMERIC = re.compile(r"\$?\d[\d,]*(?:\.\d+)?\s*(?:%|[kKmMbB]\b|[xX]\b)?")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+# ** spans are a rendering instruction for the PDF template, never content.
+_MARKUP = re.compile(r"\*\*")
 
 # Numbers carrying no factual claim alone: years inside dates, incidental small
 # counts. Flagging these is noise, not fabrication detection.
@@ -65,7 +67,8 @@ REQUIRED_EDUCATION_PHRASES = ("bachelor of science", "healthcare studies")
 
 def fold(value):
     """Lowercase, strip accents, collapse to alphanumerics and spaces."""
-    decomposed = unicodedata.normalize("NFKD", value or "")
+    value = _MARKUP.sub("", value or "")
+    decomposed = unicodedata.normalize("NFKD", value)
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
     return _NON_ALNUM.sub(" ", stripped.lower()).strip()
 
