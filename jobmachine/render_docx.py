@@ -114,6 +114,12 @@ def render(resume, out_path):
 
     _para(document, basics.get("name", ""), size=NAME_PT, bold=True,
           align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
+    # The target title, directly under the name. Parsers and recruiters both
+    # read it as the role being applied for, and it is usually the single
+    # highest-value keyword line in the document.
+    if basics.get("label"):
+        _para(document, basics["label"], size=HEADING_PT, bold=True,
+              align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2, caps=True)
     contact = _contact_line(basics)
     if contact:
         _para(document, contact, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
