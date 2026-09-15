@@ -66,22 +66,32 @@ def runs(text):
 
 
 def wrap_runs(text, size, width):
-    """Wrap mixed bold/regular text, measuring each word in its own font."""
-    words = []
+    """Wrap mixed bold/regular text, measuring each word in its own font.
+
+    Tokens carry whether a space preceded them in the source, so punctuation
+    that follows a bold span ("**Cami**, a production") stays attached to it
+    instead of drifting off as its own word.
+    """
+    tokens = []  # (text, bold, space_before)
+    first = True
     for chunk, is_bold in runs(text):
-        for w in chunk.split(" "):
-            if w:
-                words.append((w, is_bold))
+        parts = chunk.split(" ")
+        for i, w in enumerate(parts):
+            if not w:
+                continue
+            space_before = not first and (i > 0 or chunk.startswith(" "))
+            tokens.append((w, is_bold, space_before))
+            first = False
+    space_w = stringWidth(" ", REG, size)
     lines, cur, cur_w = [], [], 0.0
-    space = stringWidth(" ", REG, size)
-    for w, b in words:
+    for w, b, sp in tokens:
         ww = stringWidth(w, BOLD if b else REG, size)
-        add = ww if not cur else ww + space
+        add = ww + (space_w if (sp and cur) else 0)
         if cur and cur_w + add > width:
             lines.append(cur)
-            cur, cur_w = [(w, b)], ww
+            cur, cur_w = [(w, b, False)], ww
         else:
-            cur.append((w, b))
+            cur.append((w, b, sp))
             cur_w += add
     if cur:
         lines.append(cur)
@@ -96,12 +106,15 @@ class Layout:
         self.y = PAGE_H - MARGIN_TOP
 
     def _draw_runs(self, line, x, y, size):
-        for w, b in line:
+        space_w = stringWidth(" ", REG, size)
+        for i, (w, b, sp) in enumerate(line):
+            if sp and i:
+                x += space_w
             font = BOLD if b else REG
             self.c.setFont(font, size)
             self.c.setFillColor(black)
             self.c.drawString(x, y, w)
-            x += stringWidth(w, font, size) + stringWidth(" ", REG, size)
+            x += stringWidth(w, font, size)
 
     def para(self, text, size=None, indent=0, gap=0, font=None):
         size = size or self.s
@@ -113,7 +126,7 @@ class Layout:
                     self.c.setFont(ITAL, size)
                     self.c.setFillColor(black)
                     self.c.drawString(self.x + indent, self.y,
-                                      " ".join(w for w, _ in line))
+                                      " ".join(w for w, _, _ in line))
                 else:
                     self._draw_runs(line, self.x + indent, self.y, size)
         return self
