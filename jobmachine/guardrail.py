@@ -250,6 +250,8 @@ def check(base, tailored):
                  for k in ([s.get("name", "")] + (s.get("keywords") or []))),
         " ".join(c for e in (tailored.get("education") or [])
                  for c in (e.get("courses") or [])),
+        " ".join(" ".join([p.get("description", "")] + (p.get("highlights") or []))
+                 for p in (tailored.get("projects") or [])),
     ])
     for number in sorted(numbers_in(outside_text) - facts.numbers):
         flag("metric", number, "summary/skills/education",

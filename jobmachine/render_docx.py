@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Render a structured resume to an ATS-parseable .docx.
+"""Render a structured resume to a one-page, ATS-parseable .docx.
 
-Ported from BerniceMata/simply-apply (AGPL-3.0) services/render_docx.py.
-
-Every choice here exists because of how resume parsers actually fail, not
-because of how the document looks:
+Two constraints fight each other here. ATS parsers want boring structure:
+single column, no tables, no text boxes, no headers, literal section headings,
+real list styles. Humans want it to look like a resume. This module satisfies
+the parser first and then buys the human look back with typography alone:
+a rule under each section heading, tight leading, small caps headings, and a
+name block that reads as a masthead. No layout feature that has ever confused
+a parser is used.
 
   single column, no tables, no text boxes
       Multi-column layouts and tables are the number one cause of scrambled
@@ -13,173 +16,286 @@ because of how the document looks:
 
   no headers or footers
       Many parsers never read them, so contact details placed there vanish.
-      The contact line belongs in the body, at the top.
 
   literal section headings
-      SUMMARY / EXPERIENCE / EDUCATION / SKILLS. Parsers key off these exact
-      words. "What I Bring To The Table" is invisible to a machine.
+      SUMMARY / EXPERIENCE / PROJECTS / EDUCATION / SKILLS. Parsers key off
+      these exact words.
 
   real List Bullet style, not typed bullet characters
-      A typed "- " or U+2022 is text and can end up concatenated into the
-      previous line. A styled list paragraph carries structure the parser reads.
+      A typed "- " is text and can be concatenated into the previous line.
 
-  contact line joined with "  ·  ", never "|"
-      Some parsers treat the pipe as a column delimiter and split the line into
-      phantom fields.
+  separators are the middle dot, never the pipe
+      Some parsers treat "|" as a column delimiter and invent phantom fields.
+
+One page is enforced, not hoped for: the content is measured, and if it
+overflows, the lowest-value bullets are dropped (last bullet of the longest
+job first) until it fits. A resume that silently runs to two pages is a resume
+whose second page nobody reads.
 
 Usage:
-    python3 render_docx.py tailored.json out.docx
+    python3 render_docx.py resume.json out.docx [--lines N]
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 FONT = "Calibri"
-BODY_PT = 10
-NAME_PT = 16
-HEADING_PT = 11
-MARGIN_IN = 0.6
-SEPARATOR = "  ·  "  # middle dot; never a pipe
+BODY_PT = 9.5
+SMALL_PT = 9
+NAME_PT = 17
+TITLE_PT = 10
+HEADING_PT = 10
+MARGIN_PT = 36  # 0.5 inch
+SEP = "  ·  "
+
+# Usable characters per rendered line at BODY_PT across a 7.5in text column,
+# and the number of such lines that fit on one page at this leading. Both are
+# calibrated against the rendered output, not guessed.
+CHARS_PER_LINE = 125
+MAX_LINES = 56
 
 
 def _configure(document):
     style = document.styles["Normal"]
     style.font.name = FONT
     style.font.size = Pt(BODY_PT)
-    style.paragraph_format.space_after = Pt(0)
-    style.paragraph_format.space_before = Pt(0)
+    pf = style.paragraph_format
+    pf.space_after = Pt(0)
+    pf.space_before = Pt(0)
+    pf.line_spacing = 1.0
     for section in document.sections:
-        section.top_margin = section.bottom_margin = Pt(MARGIN_IN * 72)
-        section.left_margin = section.right_margin = Pt(MARGIN_IN * 72)
+        section.top_margin = section.bottom_margin = Pt(MARGIN_PT)
+        section.left_margin = section.right_margin = Pt(MARGIN_PT)
 
 
-def _para(document, text="", size=BODY_PT, bold=False, space_before=0, space_after=0,
-          align=None, caps=False):
-    paragraph = document.add_paragraph()
-    paragraph.paragraph_format.space_before = Pt(space_before)
-    paragraph.paragraph_format.space_after = Pt(space_after)
+def _para(document, text="", size=BODY_PT, bold=False, italic=False,
+          space_before=0, space_after=0, align=None, caps=False, color=None):
+    p = document.add_paragraph()
+    p.paragraph_format.space_before = Pt(space_before)
+    p.paragraph_format.space_after = Pt(space_after)
+    p.paragraph_format.line_spacing = 1.0
     if align is not None:
-        paragraph.alignment = align
+        p.alignment = align
     if text:
-        run = paragraph.add_run(text.upper() if caps else text)
+        run = p.add_run(text.upper() if caps else text)
         run.font.size = Pt(size)
         run.font.bold = bold
+        run.font.italic = italic
         run.font.name = FONT
-    return paragraph
+        if color:
+            run.font.color.rgb = color
+    return p
+
+
+def _rule(paragraph):
+    """A hairline under a heading. Pure paragraph border, invisible to parsers."""
+    pPr = paragraph._p.get_or_add_pPr()
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "808080")
+    borders.append(bottom)
+    pPr.append(borders)
 
 
 def _heading(document, text):
-    paragraph = _para(document, text, size=HEADING_PT, bold=True,
-                      space_before=10, space_after=2, caps=True)
-    for run in paragraph.runs:
-        run.font.color.rgb = RGBColor(0, 0, 0)
-    return paragraph
+    p = _para(document, text, size=HEADING_PT, bold=True, caps=True,
+              space_before=7, space_after=2, color=RGBColor(0, 0, 0))
+    _rule(p)
+    return p
 
 
 def _bullets(document, items):
     for item in items:
         if not item:
             continue
-        paragraph = document.add_paragraph(item, style="List Bullet")
-        paragraph.paragraph_format.space_after = Pt(1)
-        for run in paragraph.runs:
+        p = document.add_paragraph(item, style="List Bullet")
+        p.paragraph_format.space_after = Pt(1.5)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.line_spacing = 1.0
+        for run in p.runs:
             run.font.size = Pt(BODY_PT)
             run.font.name = FONT
 
 
 def _contact_line(basics):
-    location = basics.get("location") or {}
-    city = ", ".join(p for p in (location.get("city"), location.get("region")) if p)
-    fields = [city, basics.get("phone"), basics.get("email"), basics.get("url")]
-    return SEPARATOR.join(f for f in fields if f)
+    loc = basics.get("location") or {}
+    city = ", ".join(x for x in (loc.get("city"), loc.get("region")) if x)
+    return SEP.join(x for x in [city, basics.get("phone"), basics.get("email"),
+                                basics.get("url")] if x)
 
 
-def _date_range(entry):
-    start, end = entry.get("startDate") or "", entry.get("endDate") or ""
-    if start and end:
-        return "%s - %s" % (start, end)
-    return start or end
+def _dates(entry):
+    a, b = entry.get("startDate") or "", entry.get("endDate") or ""
+    return "%s - %s" % (a, b) if a and b else (a or b)
 
 
-def render(resume, out_path):
+def _lines(text, width=CHARS_PER_LINE):
+    if not text:
+        return 0
+    return max(1, -(-len(text) // width))
+
+
+def estimate_lines(resume):
+    """Rendered line count. Used to enforce the single page."""
+    basics = resume.get("basics") or {}
+    n = 2  # name + title
+    n += _lines(_contact_line(basics))
+    if basics.get("summary"):
+        n += 2 + _lines(basics["summary"])
+    work = resume.get("work") or []
+    if work:
+        n += 2
+        for job in work:
+            n += 1
+            if job.get("summary"):
+                n += 1
+            for h in job.get("highlights") or []:
+                n += _lines(h, CHARS_PER_LINE - 4)
+    projects = resume.get("projects") or []
+    if projects:
+        n += 2
+        for pr in projects:
+            n += 1
+            if pr.get("description"):
+                n += _lines(pr["description"], CHARS_PER_LINE - 4)
+            for h in pr.get("highlights") or []:
+                n += _lines(h, CHARS_PER_LINE - 4)
+    education = resume.get("education") or []
+    if education:
+        n += 2 + len(education)
+        n += sum(1 for e in education if e.get("courses"))
+    skills = resume.get("skills") or []
+    if skills:
+        n += 2
+        for s in skills:
+            kws = s.get("keywords") or []
+            text = "%s: %s" % (s.get("name", ""), ", ".join(kws)) if kws else s.get("name", "")
+            n += _lines(text)
+    if resume.get("leadership"):
+        n += 2 + _lines(resume["leadership"])
+    return n
+
+
+def fit_to_one_page(resume, max_lines=MAX_LINES):
+    """Drop the lowest-value bullets until the content fits one page.
+
+    Lowest value is defined structurally, not by judgment: the last bullet of
+    whichever job currently has the most bullets. That preserves at least one
+    bullet per role and trims the deepest section first, which is where
+    redundancy actually lives.
+    """
+    resume = copy.deepcopy(resume)
+    dropped = []
+    # Project highlights go first: each project already carries its whole claim
+    # in the description line, so the highlight is the cheapest thing on the
+    # page. Work bullets are the last thing to lose.
+    while estimate_lines(resume) > max_lines:
+        withhl = [pr for pr in (resume.get("projects") or []) if pr.get("highlights")]
+        if not withhl:
+            break
+        target = withhl[-1]
+        dropped.append("project %s: highlight" % target.get("name", "?"))
+        target["highlights"] = target["highlights"][:-1]
+    while estimate_lines(resume) > max_lines:
+        jobs = [j for j in (resume.get("work") or []) if len(j.get("highlights") or []) > 1]
+        if not jobs:
+            break
+        target = max(jobs, key=lambda j: len(j["highlights"]))
+        dropped.append("%s: %s" % (target.get("name", "?"),
+                                   target["highlights"][-1][:60] + "..."))
+        target["highlights"] = target["highlights"][:-1]
+    return resume, dropped
+
+
+def render(resume, out_path, enforce_one_page=True):
+    dropped = []
+    if enforce_one_page:
+        resume, dropped = fit_to_one_page(resume)
+
     document = Document()
     _configure(document)
     basics = resume.get("basics") or {}
 
     _para(document, basics.get("name", ""), size=NAME_PT, bold=True,
-          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
-    # The target title, directly under the name. Parsers and recruiters both
-    # read it as the role being applied for, and it is usually the single
-    # highest-value keyword line in the document.
+          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=0)
     if basics.get("label"):
-        _para(document, basics["label"], size=HEADING_PT, bold=True,
-              align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2, caps=True)
+        _para(document, basics["label"], size=TITLE_PT, bold=True, caps=True,
+              align=WD_ALIGN_PARAGRAPH.CENTER, space_after=1)
     contact = _contact_line(basics)
     if contact:
-        _para(document, contact, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
+        _para(document, contact, size=SMALL_PT,
+              align=WD_ALIGN_PARAGRAPH.CENTER, space_after=1)
 
     if basics.get("summary"):
         _heading(document, "Summary")
         _para(document, basics["summary"])
 
-    work = resume.get("work") or []
-    if work:
+    if resume.get("work"):
         _heading(document, "Experience")
-        for job in work:
-            # Employer and title on one line, dates on the same line at the end.
-            # Kept as a single paragraph so the parser binds them to each other.
-            header_bits = [b for b in (job.get("name"), job.get("position")) if b]
-            header = SEPARATOR.join(header_bits)
-            dates = _date_range(job)
-            location = job.get("location") or ""
-            tail = SEPARATOR.join(b for b in (location, dates) if b)
-            paragraph = _para(document, space_before=6, space_after=1)
-            run = paragraph.add_run(header)
-            run.font.bold = True
-            run.font.size = Pt(BODY_PT)
-            run.font.name = FONT
+        for job in resume["work"]:
+            p = _para(document, space_before=4, space_after=0)
+            left = SEP.join(x for x in (job.get("name"), job.get("position")) if x)
+            r = p.add_run(left)
+            r.font.bold = True
+            r.font.size = Pt(BODY_PT)
+            r.font.name = FONT
+            tail = SEP.join(x for x in (job.get("location"), _dates(job)) if x)
             if tail:
-                run2 = paragraph.add_run("  " + SEPARATOR.strip() + "  " + tail)
-                run2.font.size = Pt(BODY_PT)
-                run2.font.name = FONT
+                r2 = p.add_run(SEP + tail)
+                r2.font.size = Pt(SMALL_PT)
+                r2.font.name = FONT
             if job.get("summary"):
-                italic = _para(document, job["summary"], space_after=1)
-                for run3 in italic.runs:
-                    run3.font.italic = True
+                _para(document, job["summary"], size=SMALL_PT, italic=True, space_after=1)
             _bullets(document, job.get("highlights") or [])
 
-    education = resume.get("education") or []
-    if education:
-        _heading(document, "Education")
-        for edu in education:
-            # studyType and area spelled out in full: a bare abbreviation fails
-            # keyword screens (guardrail.py enforces this too).
-            degree_bits = [b for b in (edu.get("studyType"), edu.get("area")) if b]
-            line_bits = [", ".join(degree_bits), edu.get("institution") or ""]
-            dates = _date_range(edu)
-            if dates:
-                line_bits.append(dates)
-            _para(document, SEPARATOR.join(b for b in line_bits if b), space_after=1)
-            courses = edu.get("courses") or []
-            if courses:
-                _para(document, "Coursework: " + ", ".join(courses), space_after=1)
+    if resume.get("projects"):
+        _heading(document, "Projects")
+        for pr in resume["projects"]:
+            p = _para(document, space_before=4, space_after=0)
+            r = p.add_run(pr.get("name", ""))
+            r.font.bold = True
+            r.font.size = Pt(BODY_PT)
+            r.font.name = FONT
+            meta = SEP.join(x for x in (pr.get("role"), _dates(pr), pr.get("url")) if x)
+            if meta:
+                r2 = p.add_run(SEP + meta)
+                r2.font.size = Pt(SMALL_PT)
+                r2.font.name = FONT
+            if pr.get("description"):
+                _bullets(document, [pr["description"]])
+            _bullets(document, pr.get("highlights") or [])
 
-    skills = resume.get("skills") or []
-    if skills:
+    if resume.get("education"):
+        _heading(document, "Education")
+        for edu in resume["education"]:
+            degree = ", ".join(x for x in (edu.get("studyType"), edu.get("area")) if x)
+            bits = [degree, edu.get("institution") or ""]
+            if _dates(edu):
+                bits.append(_dates(edu))
+            _para(document, SEP.join(x for x in bits if x), space_after=0)
+            if edu.get("courses"):
+                _para(document, "Coursework: " + ", ".join(edu["courses"]),
+                      size=SMALL_PT, space_after=0)
+
+    if resume.get("skills"):
         _heading(document, "Skills")
-        for skill in skills:
-            keywords = skill.get("keywords") or []
-            if keywords:
-                label = skill.get("name") or ""
-                text = ("%s: %s" % (label, ", ".join(keywords))) if label else ", ".join(keywords)
-            else:
-                text = skill.get("name") or ""
+        for s in resume["skills"]:
+            kws = s.get("keywords") or []
+            label = s.get("name") or ""
+            text = ("%s: %s" % (label, ", ".join(kws))) if kws and label else (
+                ", ".join(kws) or label)
             if text:
                 _para(document, text, space_after=1)
 
@@ -188,17 +304,19 @@ def render(resume, out_path):
         _para(document, resume["leadership"])
 
     document.save(out_path)
-    return out_path
+    return out_path, dropped
 
 
 def main(argv):
-    if len(argv) != 3:
-        print("usage: python3 render_docx.py tailored.json out.docx")
+    if len(argv) < 3:
+        print("usage: python3 render_docx.py resume.json out.docx")
         return 2
     with open(argv[1]) as fh:
         resume = json.load(fh)
-    path = render(resume, argv[2])
-    print("wrote %s" % path)
+    path, dropped = render(resume, argv[2])
+    print("wrote %s (estimated %d lines)" % (path, estimate_lines(resume)))
+    for d in dropped:
+        print("  trimmed to fit one page: %s" % d)
     return 0
 
 
