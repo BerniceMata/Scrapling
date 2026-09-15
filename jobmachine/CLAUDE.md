@@ -24,7 +24,8 @@ Pipeline: CONFIG → DISCOVER → SCREEN → TAILOR → SUBMIT → OUTREACH → 
 - No invented tools, titles, metrics, or certifications. Zero Salesforce stays zero until Trailhead is actually completed — then it is one true line.
 - "Deployed", not "in production", until tested. The $300K pipeline claim needs its breakdown written before any interview.
 - Education line is always **"Bachelor of Science (B.S.), Healthcare Studies"** spelled out — bare "B.S." fails keyword screens (paid-for lesson).
-- Resume truth base: the two master resumes in Google Drive (Sep 4, 2026 versions). Nothing beyond their claims may appear in any variant, answer, or cover letter.
+- Resume truth base: the two master resumes in Google Drive (Sep 4, 2026 versions), now also structured as `data/private/resume_master_a.json` and `_b.json`. Nothing beyond their claims may appear in any variant, answer, or cover letter.
+- **The truth rules are enforced by code, not by care.** `guardrail.py` is a whitelist over the master: employers, titles, dates, institutions, degrees, projects and skills must match a master value; every number must appear in *that same employer's* entry (a figure cannot migrate between roles); em dashes and an abbreviated degree are violations. `render` refuses to produce a document that fails. A blocklist only catches fabrications someone anticipated; a whitelist catches all of them by construction, and its failure mode is a false positive rather than career damage.
 
 ## Shadow mode (law)
 
@@ -58,7 +59,19 @@ python3 jobmachine/jobsctl.py discover          # -> data/jobs.csv (gated + rank
 python3 jobmachine/jobsctl.py jd gh:headway:123 # fetch + cache one JD
 python3 jobmachine/jobsctl.py screen data/private/resume_master_b.txt gh:headway:123
 python3 jobmachine/jobsctl.py state             # run log / seen / rejected counts
+
+# TAILOR loop (structured resume -> guardrail -> ATS-safe docx)
+python3 jobsctl.py tailor gh:oscar:8076314 --master b   # writes the tailoring brief
+#   ... produce data/private/tailored/<key>.json from that brief ...
+python3 jobsctl.py check  data/private/resume_master_b.json data/private/tailored/<key>.json
+python3 jobsctl.py render data/private/resume_master_b.json data/private/tailored/<key>.json \
+        "data/private/out/Mitchell_Nicholas_<Company>.docx"
 ```
+
+`render` runs the guardrail first and refuses on any violation. There is no
+model key in this repo: the rewrite is done by the model reading the brief, and
+the guardrail is what makes that safe to trust.
+
 
 Note: this cloud sandbox's egress policy blocks the ATS API hosts; sweeps run on
 the Composio remote workbench or locally until the environment network policy is

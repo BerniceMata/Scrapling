@@ -47,6 +47,7 @@ JDS = DATA / "jds"
 SLUGS_FILE = DATA / "slugs.json"
 STATE_FILE = DATA / "graph-state.json"
 JOBS_CSV = DATA / "jobs.csv"
+PRIVATE = DATA / "private"  # gitignored: masters, answer bank, tracker, tailored output
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -703,6 +704,115 @@ def cmd_doctor(args):
     sys.exit(1 if failures else 0)
 
 
+def cmd_tailor(args):
+    """Emit the tailoring brief for one job: master + JD + the rules.
+
+    The rewrite itself is done by the model reading this brief (Claude in this
+    session, or any LLM), not by an API call from here - jobmachine holds no
+    model key. The brief is written so the output can be pasted straight to
+    data/private/tailored/<key>.json and then run through `check`.
+    """
+    key = args.key
+    master_path = PRIVATE / ("resume_master_%s.json" % args.master.lower())
+    if not master_path.exists():
+        print("! missing %s" % master_path)
+        return
+    jd_path = JDS / (key.replace(":", "__") + ".txt")
+    jd = jd_path.read_text()[:12000] if jd_path.exists() else ""
+    if not jd:
+        print("! no cached JD for %s - run: jobsctl.py jd %s" % (key, key))
+        return
+    rows = {r["key"]: r for r in csv.DictReader(JOBS_CSV.open())} if JOBS_CSV.exists() else {}
+    row = rows.get(key, {})
+    out_dir = PRIVATE / "tailored"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    brief = out_dir / (key.replace(":", "__") + ".brief.md")
+    brief.write_text(TAILOR_BRIEF.format(
+        company=row.get("company", "?"), title=row.get("title", "?"),
+        location=row.get("location", "?"), master=args.master.upper(),
+        master_path=master_path, jd=jd,
+        out_path=out_dir / (key.replace(":", "__") + ".json"),
+    ))
+    print("wrote %s" % brief)
+    print("next: produce the tailored JSON, then")
+    print("  python3 guardrail.py %s %s" % (master_path, out_dir / (key.replace(':', '__') + '.json')))
+
+
+TAILOR_BRIEF = """# Tailoring brief: {company} - {title}
+
+Location: {location}
+Master (truth base): {master} at {master_path}
+Write the tailored resume as JSON to: {out_path}
+
+## Rules (guardrail.py enforces these; violations block the submit)
+
+ALLOWED:
+- Reorder work entries, bullets, and skill groups for this role.
+- Rewrite bullet and summary phrasing to use this JD's vocabulary for the SAME
+  work that is already described in the master.
+- Surface skills that already appear ANYWHERE in the master, including ones
+  currently buried inside a bullet or a job summary.
+- Drop bullets or entries that are irrelevant to this role.
+
+FORBIDDEN:
+- Adding an employer, title, school, degree, or project not in the master.
+- Changing any date, including extending one to close a gap.
+- Changing or inflating any number, percentage, or dollar figure. If the master
+  says 45+, the output says 45+. Numbers may not move between employers.
+- Adding a skill the master never mentions, even if the JD asks for it.
+- Em dashes or en dashes anywhere. Use a comma, colon, or period.
+- Abbreviating the degree. It stays "Bachelor of Science (B.S.)" with
+  "Healthcare Studies" spelled out.
+
+Keep the same JSON shape as the master, including the "location" object under
+basics. Output JSON only.
+
+## Job description
+
+{jd}
+"""
+
+
+def cmd_check(args):
+    """Run the no-fabrication guardrail on a tailored resume."""
+    sys.path.insert(0, str(ROOT))
+    import guardrail
+    base = load_json(Path(args.master), None)
+    tailored = load_json(Path(args.tailored), None)
+    if base is None or tailored is None:
+        print("! could not read both files")
+        return
+    violations = guardrail.check(base, tailored)
+    if not violations:
+        print("GUARDRAIL CLEAN: %s traces entirely to %s" % (args.tailored, args.master))
+        return
+    print("GUARDRAIL FAILED: %d violation(s) - do NOT submit this version\n" % len(violations))
+    print(guardrail.summarize(violations, limit=100))
+
+
+def cmd_render(args):
+    """Render a tailored resume to an ATS-parseable .docx."""
+    sys.path.insert(0, str(ROOT))
+    import guardrail
+    import render_docx
+    base = load_json(Path(args.master), None)
+    tailored = load_json(Path(args.tailored), None)
+    if base is None or tailored is None:
+        print("! could not read both files")
+        return
+    violations = guardrail.check(base, tailored)
+    if violations and not args.force:
+        print("REFUSING TO RENDER: %d guardrail violation(s)\n" % len(violations))
+        print(guardrail.summarize(violations, limit=100))
+        print("\nFix the tailored JSON, or pass --force to render anyway (not advised).")
+        return
+    if violations:
+        print("! rendering with %d unresolved violation(s) because --force was passed"
+              % len(violations))
+    path = render_docx.render(tailored, args.out)
+    print("wrote %s" % path)
+
+
 def cmd_prep(args):
     """Build a review packet for one job: reality gate, coverage, answers, next steps.
 
@@ -911,6 +1021,24 @@ def main() -> None:
     dg.add_argument("--dry-run", action="store_true",
                     help="don't advance the last_digest marker")
     dg.set_defaults(fn=cmd_digest)
+
+    tl = sub.add_parser("tailor", help="emit the tailoring brief for one job")
+    tl.add_argument("key")
+    tl.add_argument("--master", default="b", choices=["a", "b", "A", "B"])
+    tl.set_defaults(fn=cmd_tailor)
+
+    ck = sub.add_parser("check", help="run the no-fabrication guardrail")
+    ck.add_argument("master")
+    ck.add_argument("tailored")
+    ck.set_defaults(fn=cmd_check)
+
+    rd = sub.add_parser("render", help="guardrail, then render an ATS-safe docx")
+    rd.add_argument("master")
+    rd.add_argument("tailored")
+    rd.add_argument("out")
+    rd.add_argument("--force", action="store_true",
+                    help="render despite guardrail violations (not advised)")
+    rd.set_defaults(fn=cmd_render)
 
     pr = sub.add_parser("prep")
     pr.add_argument("key")
