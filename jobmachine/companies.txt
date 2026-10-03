@@ -299,3 +299,46 @@ Amedisys
 Vivo Infusion
 Organon
 Zimmer Biomet
+
+Cresta
+Boulevard
+Samsara
+Klaviyo
+Braze
+Customer.io
+Iterable
+Nomi Health
+Tia
+Carbon Health
+Cerebral
+Parsley Health
+Forward
+dbt Labs
+SpecterOps
+Modern Health
+Flodesk
+AlertMedia
+Aceable
+Postscript
+Attentive
+Mailchimp
+SendGrid
+Sinch
+Mailgun
+Loop Returns
+FloQast
+ChowNow
+Anthropic
+Gradial
+Atomicwork
+Turing
+Human Agency
+Culture Amp
+Emergent Labs
+Remote.com
+Beacon Software
+Vimeo
+Well
+Enumerate
+Earnin
+Globalization Partners

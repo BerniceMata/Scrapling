@@ -38,7 +38,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -66,17 +66,22 @@ TITLE_INCLUDE = re.compile(
     r"|customer success|client success|customer experience"
     r"|implementation|onboarding|enablement"
     r"|revenue operations|rev ?ops|sales operations|sales ops"
-    r"|go[- ]?to[- ]?market|gtm"
-    r"|growth (?:ops|operations|associate|analyst|marketing)"
-    r"|marketing operations|marketing ops"
-    r"|ai (?:operations|ops)|business operations|bizops"
+    r"|go[- ]?to[- ]?market|\bgtm\b|revenue systems|gtm systems"
+    r"|growth (?:ops|operations|associate|analyst|marketing|engineer)"
+    r"|marketing operations|marketing ops|marketing engineer"
+    r"|ai (?:operations|ops|engineer|automation)|applied ai|agent engineer"
+    r"|forward[- ]deployed|solutions? (?:engineer|architect|consultant|associate|specialist)"
+    r"|email deliverability|deliverability|email infrastructure"
+    r"|lifecycle marketing|marketing automation|campaign operations"
+    r"|business operations|bizops"
     r"|training (?:and|&) development"
-    r"|solutions (?:consultant|associate|specialist))",
+    r"|(?:patient|care|clinical|program) coordinator|genetic counseling assistant)",
     re.I,
 )
 TITLE_EXCLUDE = re.compile(
     r"(senior|\bsr\.?\b|staff|principal|director|vice president|\bvp\b"
-    r"|head of|chief|intern(ship)?\b|\bii\b|\biii\b|\biv\b)",
+    r"|head of|chief|intern(ship)?\b|\bii\b|\biii\b|\biv\b"
+    r"|\bmanager\b|\blead\b|research|\bphd\b|nurse|\brn\b|licensed|\bnp\b)",
     re.I,
 )
 
@@ -386,20 +391,23 @@ def cmd_resolve(args):
 
 
 def bucket(title: str) -> str:
+    """Six job families from the Greenhouse Dorks doc, most specific first."""
     t = title.lower()
     for pat, name in [
+        (r"gtm engineer|gtm systems|revenue systems|growth engineer|marketing engineer", "F1 GTM Eng"),
+        (r"forward[- ]deployed|solutions? (?:engineer|architect)|ai engineer|applied ai"
+         r"|ai automation|agent engineer|ai (?:operations|ops)", "F2 AI/FDE"),
+        (r"deliverability|email infrastructure|lifecycle marketing|marketing automation"
+         r"|campaign operations", "F3 Lifecycle"),
+        (r"revenue operations|rev ?ops|sales operations|sales ops|marketing op"
+         r"|gtm|go[- ]?to[- ]?market|business operations|bizops|growth", "F4 RevOps"),
+        (r"(?:patient|care|clinical|program) coordinator|genetic counseling", "F5 HC Admin"),
         (r"sdr|bdr|sales development|business development", "SDR/BDR"),
-        (r"account executive", "AE"),
         (r"implementation|onboarding", "Implementation"),
         (r"customer success|client success|customer experience", "CS"),
-        (r"revenue operations|rev ?ops|sales operations|sales ops", "RevOps"),
-        (r"gtm|go[- ]?to[- ]?market", "GTM Ops"),
-        (r"growth", "Growth"),
-        (r"marketing op", "Marketing Ops"),
-        (r"ai op", "AI Ops"),
-        (r"enablement", "Enablement"),
-        (r"training", "Training"),
-        (r"business operations|bizops", "BizOps"),
+        (r"enablement|training", "Enablement"),
+        (r"solutions? (?:consultant|associate|specialist)", "Solutions"),
+        (r"account executive", "AE"),
         (r"account manager|inside sales|sales", "Sales"),
     ]:
         if re.search(pat, t):
@@ -407,11 +415,14 @@ def bucket(title: str) -> str:
     return "Other"
 
 
+# Family 6 (health-tech GTM) is family 1/4 at a healthcare company: it is
+# scored through HEALTHCARE_HINTS in prior_score, not as a separate bucket.
 BUCKET_WEIGHT = {
-    "SDR/BDR": 10, "RevOps": 10, "GTM Ops": 10, "AI Ops": 10,
-    "Implementation": 8, "CS": 8, "Growth": 8, "Marketing Ops": 6,
-    "Enablement": 6, "Training": 6, "Sales": 6, "BizOps": 5, "AE": 4, "Other": 0,
+    "F1 GTM Eng": 12, "F2 AI/FDE": 11, "F3 Lifecycle": 10, "F4 RevOps": 10,
+    "SDR/BDR": 8, "Implementation": 7, "CS": 7, "Solutions": 7, "Enablement": 6,
+    "Sales": 5, "AE": 4, "F5 HC Admin": 3, "Other": 0,
 }
+OPS_BUCKETS = {"F1 GTM Eng", "F2 AI/FDE", "F3 Lifecycle", "F4 RevOps", "Solutions"}
 
 
 def comp_floor_ok(comp: str) -> bool | None:
@@ -692,7 +703,11 @@ def cmd_doctor(args):
             print(f"  {name:<12} OK   ({slug}: {n} postings)")
         else:
             failures += 1
-            print(f"  {name:<12} FAIL (status={status}) - lane is DOWN, do not trust sweeps")
+            host = {"greenhouse": "boards-api.greenhouse.io", "lever": "api.lever.co",
+                    "ashby": "api.ashbyhq.com"}[name]
+            why = ("DENIED HOST - add it under the environment's Allowed domains"
+                   if status in (-1, 403, 407) else "lane is DOWN")
+            print(f"  {name:<12} FAIL (status={status}) {host}: {why}")
     slugs = load_json(SLUGS_FILE, {})
     print(f"  boards resolved: {len(slugs)}"
           + ("" if slugs else "  (run resolve)"))
@@ -831,8 +846,7 @@ def cmd_prep(args):
                          or re.search(r"health|clinic|patient|provider|payer", tl))
     # role bucket beats industry: ops/technical roles always get Master A
     # (the ShiftKey lesson: healthcare company + RevOps title = A, not B)
-    ops_bucket = bucket(jd["title"]) in {
-        "RevOps", "GTM Ops", "Growth", "AI Ops", "Marketing Ops", "BizOps"}
+    ops_bucket = bucket(jd["title"]) in OPS_BUCKETS
     master = "a" if ops_bucket else ("b" if healthcareish else "a")
     resume_path = args.resume
     if not resume_path:
@@ -931,9 +945,20 @@ def cmd_digest(args):
         key=lambda r: -int(r["score"]))
 
     lines = [f"# Job Machine digest - {today}", ""]
-    lines.append(f"## Scoreboard (deadline: signed offer by 2026-09-24)")
+    lines.append(f"## Scoreboard (deadline: signed offer by 2026-11-14)")
     lines.append(f"- applied: {len(applied)}   follow-ups due: {len(followups)}   "
                  f"open leads tracked: {len(rows)}")
+    rs = _results_summary()
+    lines.append(f"- machine: submitted today {rs['submitted_today']} (total {rs['submitted_total']})   "
+                 f"failed {rs['failed_today']}   captcha {rs['captcha_today']}   "
+                 f"manual {rs['manual_today']}   shadow {rs['shadow_today']}")
+    if state.get("paused"):
+        lines.append(f"- LANE PAUSED: {state['paused']}  (only Mitchell un-pauses: jobsctl resume)")
+    if MANUAL_QUEUE.exists():
+        mq = MANUAL_QUEUE.read_text().splitlines()
+        heads = [l for l in mq if l.startswith("## ")]
+        if heads:
+            lines.append(f"- manual queue: {heads[-1][3:]}  -> data/private/manual-queue.md")
     if followups:
         lines.append("\n## Follow-ups due (5-7 business days, no reply)")
         for t in followups:
@@ -983,6 +1008,264 @@ def cmd_state(args):
           f"rejected(cached): {len(state['rejected'])}")
     for r in state["runs"][-5:]:
         print(f"  {r['at']}: passed={r['passed']} new={r['new']} drops={r['drops']}")
+
+
+
+# ----------------------------------------------------- questions / queue / track
+
+COMPANY_CAP, COMPANY_WINDOW_DAYS = 3, 7
+RESULTS = PRIVATE / "results.jsonl"
+QUEUE_FILE = DATA / "apply-queue.json"
+MANUAL_QUEUE = PRIVATE / "manual-queue.md"
+
+
+def _parse_key(key: str):
+    source, slug, job_id = key.split(":", 2)
+    return source, slug, job_id
+
+
+def pick_master(company: str, title: str) -> str:
+    """Ops/technical bucket -> A regardless of industry; coordinator -> B;
+    otherwise healthcare company -> B, else A."""
+    b = bucket(title)
+    if b in OPS_BUCKETS:
+        return "a"
+    if b == "F5 HC Admin":
+        return "b"
+    return "b" if HEALTHCARE_HINTS.search(company or "") else "a"
+
+
+def apply_url_for(source: str, slug: str, job_id: str, fallback: str) -> str:
+    if source == "lever":
+        return f"https://jobs.lever.co/{slug}/{job_id}/apply"
+    if source == "ashby":
+        return f"https://jobs.ashbyhq.com/{slug}/{job_id}/application"
+    if source == "gh":
+        return f"https://job-boards.greenhouse.io/{slug}/jobs/{job_id}"
+    return fallback
+
+
+def cmd_questions(args):
+    """Greenhouse: read every form field from the job board API before any browser opens."""
+    import forms
+    rows = list(csv.DictReader(JOBS_CSV.open())) if JOBS_CSV.exists() else []
+    keys = [args.key] if args.key else [r["key"] for r in rows if r["key"].startswith("gh:")]
+    todo = [k for k in keys if args.refresh or not forms.questions_path(k).exists()]
+    cached = len(keys) - len(todo)
+    if args.limit:
+        todo = todo[:args.limit]
+
+    def work(k):
+        _, slug, job_id = _parse_key(k)
+        payload, err = forms.fetch_gh_questions(slug, job_id)
+        return k, payload, err
+
+    done, failed = 0, []
+    with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for k, payload, err in ex.map(work, todo):
+            if payload is None:
+                failed.append(f"{k}: {err}")
+                continue
+            payload["key"] = k
+            payload["fetched_at"] = now_iso()
+            path = forms.questions_path(k)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=1))
+            done += 1
+    print(f"questions: fetched={done} cached={cached} failed={len(failed)} "
+          f"(lever/ashby forms are read from the DOM by apply.py)")
+    for f in failed[:20]:
+        print(f"  ! {f}")
+    if failed and len(failed) == len(todo) and todo:
+        print("  every fetch failed - if the status is 403/-1 the host is denied by the "
+              "environment network policy (boards-api.greenhouse.io)")
+
+
+def _load_state():
+    return load_json(STATE_FILE, {"runs": [], "seen": {}, "rejected": {}, "applied": {}, "manual": {}})
+
+
+def cmd_queue(args):
+    """Deterministic apply queue. No model. Everything refused lands in the manual queue with a reason."""
+    import forms
+    from collections import Counter
+    bank = forms.load_bank()
+    state = _load_state()
+    if state.get("paused"):
+        sys.exit(f"LANE PAUSED: {state['paused']} - only Mitchell un-pauses (jobsctl resume)")
+    rows = list(csv.DictReader(JOBS_CSV.open())) if JOBS_CSV.exists() else []
+    rows.sort(key=lambda r: -int(r["score"] or 0))
+    applied = state.setdefault("applied", {})
+    manual_state = state.setdefault("manual", {})
+    now = datetime.now(timezone.utc)
+    recent = Counter()
+    for v in applied.values():
+        try:
+            at = datetime.fromisoformat(v["at"].replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if (now - at).days < COMPANY_WINDOW_DAYS:
+            recent[(v.get("company") or "").lower()] += 1
+
+    out, manual, skipped = [], [], Counter()
+    for r in rows:
+        key = r["key"]
+        source, slug, job_id = _parse_key(key)
+        company = r["company"]
+        if key in applied:
+            skipped["applied"] += 1
+            continue
+        if key in state["rejected"]:
+            skipped["rejected"] += 1
+            continue
+        if key in manual_state and not args.retry_manual:
+            skipped["manual_already"] += 1
+            continue
+        if recent[company.lower()] >= COMPANY_CAP:
+            skipped["company_cap"] += 1
+            continue
+        if r.get("age_days") and int(r["age_days"]) > MAX_AGE_DAYS:
+            skipped["age"] += 1
+            continue
+        if comp_floor_ok(r.get("comp", "")) is False:
+            skipped["comp"] += 1
+            continue
+        qpath = forms.questions_path(key)
+        questions = json.loads(qpath.read_text()) if qpath.exists() else None
+        plan = forms.plan_form(questions["questions"], bank) if questions else None
+        if plan and plan["blockers"]:
+            reasons = [f"{q['label'][:60]}: {why}" for q, why in plan["blockers"]]
+            manual.append((r, reasons))
+            manual_state[key] = {"at": now_iso(), "reasons": reasons}
+            continue
+        out.append({
+            "key": key, "source": source, "slug": slug, "job_id": job_id,
+            "company": company, "title": r["title"], "bucket": r["bucket"],
+            "score": int(r["score"] or 0), "location": r["location"], "comp": r["comp"],
+            "master": pick_master(company, r["title"]),
+            "url": (questions or {}).get("apply_url") or apply_url_for(source, slug, job_id, r["url"]),
+            "questions": str(qpath) if questions else None,
+            "free_short": [q["label"] for q in plan["free_short"]] if plan else [],
+        })
+        recent[company.lower()] += 1
+        if len(out) >= args.cap:
+            break
+
+    QUEUE_FILE.write_text(json.dumps(out, indent=1))
+    if manual:
+        MANUAL_QUEUE.parent.mkdir(parents=True, exist_ok=True)
+        with MANUAL_QUEUE.open("a") as f:
+            f.write(f"\n## {now.strftime('%Y-%m-%d %H:%M')} UTC - refused by the gates ({len(manual)})\n")
+            for r, reasons in manual:
+                f.write(f"- [{r['score']}] {r['company']} - {r['title']}  {r['url']}\n")
+                for why in reasons:
+                    f.write(f"    - {why}\n")
+    save_json(STATE_FILE, state)
+    needs_draft = sum(1 for q in out if q["free_short"])
+    print(f"queue: {len(out)} queued (cap {args.cap}), {needs_draft} need a short answer drafted, "
+          f"{len(manual)} to manual queue, skipped={dict(skipped)}")
+    print(f"wrote {QUEUE_FILE}" + (f" and appended {MANUAL_QUEUE}" if manual else ""))
+
+
+def _business_days_after(start: datetime, n: int) -> str:
+    d = start
+    while n > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d.strftime("%Y-%m-%d")
+
+
+def cmd_track(args):
+    """Mirror submitted results into the tracker CSV (the Sheet is synced by the session)."""
+    tracker = PRIVATE / "tracker.csv"
+    rows = list(csv.DictReader(tracker.open())) if tracker.exists() else []
+    fields = list(rows[0].keys()) if rows else [
+        "date_added", "company", "role", "bucket", "location", "comp", "score", "status",
+        "resume_version", "next_action", "applied_date", "followup_due"]
+    if "key" not in fields:
+        fields.append("key")
+    have = {r.get("key") for r in rows if r.get("key")}
+    have_pairs = {(r["company"].lower(), r["role"].lower()) for r in rows}
+    added = 0
+    if RESULTS.exists():
+        for line in RESULTS.read_text().splitlines():
+            if not line.strip():
+                continue
+            res = json.loads(line)
+            if res.get("outcome") != "submitted" or res["key"] in have:
+                continue
+            if (res["company"].lower(), res["title"].lower()) in have_pairs:
+                continue
+            at = datetime.fromisoformat(res["ts"].replace("Z", "+00:00"))
+            rows.append({
+                "date_added": at.strftime("%Y-%m-%d"), "company": res["company"],
+                "role": res["title"], "bucket": res.get("bucket", ""),
+                "location": res.get("location", ""), "comp": res.get("comp", ""),
+                "score": res.get("score", ""), "status": "Applied",
+                "resume_version": "Master " + res.get("master", "a").upper(),
+                "next_action": "follow up if no reply", "applied_date": at.strftime("%Y-%m-%d"),
+                "followup_due": _business_days_after(at, 6), "key": res["key"],
+            })
+            have.add(res["key"])
+            added += 1
+    with tracker.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fields})
+    print(f"track: {added} new Applied rows -> {tracker} ({len(rows)} total)")
+
+
+def cmd_pause(args):
+    state = _load_state()
+    state["paused"] = f"{args.reason or 'manual'} at {now_iso()}"
+    save_json(STATE_FILE, state)
+    print(f"LANE PAUSED: {state['paused']}")
+
+
+def cmd_resume(args):
+    """Mitchell-only by law. The code cannot tell who is typing; the law can."""
+    state = _load_state()
+    was = state.pop("paused", None)
+    save_json(STATE_FILE, state)
+    print(f"lane resumed (was: {was})")
+
+
+def _results_summary():
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = {"submitted_today": 0, "submitted_total": 0, "failed_today": 0,
+           "captcha_today": 0, "manual_today": 0, "shadow_today": 0}
+    if RESULTS.exists():
+        for line in RESULTS.read_text().splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            is_today = r.get("ts", "").startswith(today)
+            o = r.get("outcome")
+            if o == "submitted":
+                out["submitted_total"] += 1
+                out["submitted_today"] += is_today
+            elif is_today and o in ("failed", "captcha", "manual", "shadow"):
+                out[f"{o}_today"] += 1
+    return out
+
+
+
+def cmd_slugs_merge(args):
+    """Merge dork-discovered boards ({slug: {source, slug}}) into data/slugs.json."""
+    slugs = load_json(SLUGS_FILE, {})
+    new = load_json(Path(args.file), {})
+    known = {(m["source"], m["slug"].lower()) for m in slugs.values()}
+    added = 0
+    for name, meta in new.items():
+        if (meta["source"], meta["slug"].lower()) in known:
+            continue
+        slugs[name] = {"source": meta["source"], "slug": meta["slug"], "via": "expand"}
+        known.add((meta["source"], meta["slug"].lower()))
+        added += 1
+    save_json(SLUGS_FILE, slugs)
+    print(f"slugs-merge: +{added} boards (now {len(slugs)}) -> {SLUGS_FILE}")
 
 
 # ----------------------------------------------------------------------- main
@@ -1051,6 +1334,31 @@ def main() -> None:
     rj.set_defaults(fn=cmd_reject)
 
     sub.add_parser("state").set_defaults(fn=cmd_state)
+
+    qs = sub.add_parser("questions", help="Greenhouse form fields via API -> data/jds/*.questions.json")
+    qs.add_argument("key", nargs="?")
+    qs.add_argument("--refresh", action="store_true")
+    qs.add_argument("--limit", type=int, default=0)
+    qs.add_argument("--workers", type=int, default=8)
+    qs.set_defaults(fn=cmd_questions)
+
+    qu = sub.add_parser("queue", help="deterministic apply queue -> data/apply-queue.json")
+    qu.add_argument("--cap", type=int, default=60)
+    qu.add_argument("--retry-manual", action="store_true",
+                    help="re-evaluate jobs previously sent to the manual queue")
+    qu.set_defaults(fn=cmd_queue)
+
+    tr = sub.add_parser("track", help="results.jsonl -> tracker.csv Applied rows")
+    tr.set_defaults(fn=cmd_track)
+
+    sm = sub.add_parser("slugs-merge", help="merge expand-batch json into data/slugs.json")
+    sm.add_argument("file")
+    sm.set_defaults(fn=cmd_slugs_merge)
+
+    pa = sub.add_parser("pause")
+    pa.add_argument("reason", nargs="?")
+    pa.set_defaults(fn=cmd_pause)
+    sub.add_parser("resume", help="Mitchell only").set_defaults(fn=cmd_resume)
 
     args = p.parse_args()
     args.fn(args)

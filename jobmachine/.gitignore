@@ -4,3 +4,8 @@ resumes/
 answers.json
 *.docx
 *.pdf
+data/screenshots/
+data/apply-queue.json
+data/jds/*.questions.json
+data/expand-*.json
+resumes/

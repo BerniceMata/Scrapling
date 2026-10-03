@@ -280,6 +280,66 @@ def check(base, tailored):
     return violations
 
 
+# ----------------------------------------------------------- free-text answers
+
+# Tool and employer names a generated answer may assert only if the master
+# does. Everything in this list that appears in an answer must also appear in
+# the master corpus; it is the same whitelist, applied to prose.
+_CLAIM_TERMS = (
+    "salesforce", "hubspot", "gohighlevel", "airtable", "marketo", "pardot",
+    "outreach", "salesloft", "apollo", "zoominfo", "gong", "clay", "n8n",
+    "zapier", "make.com", "sql", "python", "typescript", "javascript", "claude",
+    "openai", "chatgpt", "mcp", "netlify", "aws", "gcp", "azure", "snowflake",
+    "dbt", "looker", "tableau", "epic", "cerner", "athena", "hipaa",
+)
+
+
+def check_text(base, text, max_words=90):
+    """Return violations for one free-text answer against the master.
+
+    The answer is prose, not a resume, so the checks are the subset that make
+    sense for prose: every number traces to the master (document-wide, since a
+    short answer rarely names an employer per figure), every employer or
+    institution it names is a master employer, every known tool it claims is a
+    master skill, no em dashes, and a length cap so a "short answer" stays short.
+    Empty list = clean.
+    """
+    facts = BaseFacts(base)
+    violations = []
+    folded = fold(text)
+
+    def flag(kind, value, detail):
+        violations.append({"kind": kind, "value": value, "where": "answer", "detail": detail})
+
+    for number in sorted(numbers_in(text) - facts.numbers):
+        flag("metric", number, "Figure is not in the master resume.")
+
+    for term in _CLAIM_TERMS:
+        if re.search(r"\b%s\b" % re.escape(term), folded) and not facts.mentions(term):
+            flag("skill", term, "Tool or technology is not in the master resume.")
+
+    # An employer the master does not list, asserted as past work. Only names
+    # that look like a work claim are checked ("at X", "with X", "for X").
+    for m in re.finditer(r"\b(?:at|with|for|joined)\s+([A-Z][A-Za-z0-9&.]+(?:\s+[A-Z][A-Za-z0-9&.]+){0,2})", text or ""):
+        name = m.group(1)
+        if key(name) in facts.employers or facts.mentions(name):
+            continue
+        # Company being applied to is named with "for <Company>" legitimately;
+        # only flag when the phrasing claims past employment.
+        if re.search(r"\b(?:worked|work|working|role|job|position|experience|managed|ran|led|built|owned)\b[^.]{0,40}\b(?:at|with)\s+" + re.escape(name), text):
+            flag("employer", name, "Employer is not in the master resume.")
+
+    if "\u2014" in (text or "") or "\u2013" in (text or ""):
+        flag("style", "em dash", "Em or en dash found - replace with a comma, colon, or period.")
+
+    words = len((text or "").split())
+    if words > max_words:
+        flag("length", str(words), "Answer exceeds %d words." % max_words)
+    if words == 0:
+        flag("length", "0", "Empty answer.")
+    return violations
+
+
 def summarize(violations, limit=20):
     """Feedback block, suitable for handing back on a retry."""
     lines = ["- %s %r at %s: %s" % (v["kind"], v["value"], v["where"], v["detail"])
