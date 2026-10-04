@@ -326,6 +326,10 @@ def run_job(pw_browser, job, bank, shadow: bool, resume: Path) -> dict:
             reasons = [f"{q['label'][:60]}: {why}" for q, why in plan["blockers"]]
             res.update(outcome="manual", reason="; ".join(reasons))
             to_manual(job, reasons)
+            learn = [forms.learning_record(q, job, why) for q, why in plan.get("learnable", [])]
+            if learn:
+                forms.add_learning(PRIVATE / "learning-queue.json", learn)
+                res["learning"] = [r["normalized_question"] for r in learn]
             return res
 
         filled, errors = [], []

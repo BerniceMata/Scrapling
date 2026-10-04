@@ -148,6 +148,118 @@ def normalize_gh(payload: dict) -> dict:
     }
 
 
+# ------------------------------------------------------------ option matching
+
+_STOP = {"please", "select", "do", "you", "are", "have", "the", "a", "an", "your", "to",
+         "of", "in", "for", "with", "any", "this", "that", "is", "be", "will", "would",
+         "if", "or", "and", "on", "at", "we", "us", "our", "i", "my", "me", "which",
+         "what", "how", "about", "from", "it", "its", "can", "could", "there"}
+
+# Explicit aliases for sensitive/binary values. Matching here is exact after
+# normalization, never similarity, per Mitchell's amendment 3.
+_ALIASES = {
+    "yes": {"yes", "y", "true"},
+    "no": {"no", "n", "false"},
+    "male": {"male", "man", "he him", "he/him"},
+    "black or african american": {"black or african american", "black/african american",
+                                  "black african american", "african american or black",
+                                  "black (african american)", "black"},
+    "i am not a protected veteran": {"i am not a protected veteran", "not a protected veteran",
+                                     "no i am not a protected veteran", "i am not a veteran",
+                                     "no not a protected veteran", "not a veteran"},
+    "no, i do not have a disability": {"no i do not have a disability", "no i dont have a disability",
+                                       "no i do not have a disability and have not had one in the past",
+                                       "i do not have a disability", "no disability", "no"},
+    "united states": {"united states", "united states of america", "usa", "us", "u s", "u s a"},
+    "texas": {"texas", "tx"},
+}
+
+
+def _norm(s: str) -> str:
+    s = (s or "").lower().replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_question(label: str) -> str:
+    toks = [t for t in _norm(label).split() if t not in _STOP]
+    return " ".join(toks)
+
+
+def match_option(want: str, values: list, sensitive: bool = True):
+    """Pick the option equal to `want` after normalization, or a listed alias.
+    Non-sensitive fields may fall back to the single option containing every
+    significant token of `want`; sensitive fields never guess."""
+    if not want:
+        return None
+    w = _norm(want)
+    normed = [(_norm(v), v) for v in values]
+    for nv, v in normed:
+        if nv == w:
+            return v
+    aliases = _ALIASES.get(w, set())
+    for nv, v in normed:
+        if nv in aliases:
+            return v
+    for key, al in _ALIASES.items():
+        if w in al:
+            for nv, v in normed:
+                if nv == key or nv in al:
+                    return v
+    if sensitive:
+        return None
+    toks = [t for t in w.split() if t not in _STOP]
+    hits = [v for nv, v in normed if toks and all(t in nv.split() for t in toks)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def learned_lookup(q: dict, bank: dict):
+    """Answers Mitchell gave in a learning interview: {"patterns": [...], "value": ..., "normalized": ...}."""
+    lab = q.get("label") or ""
+    nq = normalize_question(lab)
+    for item in bank.get("learned") or []:
+        if item.get("normalized") and item["normalized"] == nq:
+            return item
+        for pat in item.get("patterns") or []:
+            try:
+                if re.search(pat, lab, re.I):
+                    return item
+            except re.error:
+                continue
+    return None
+
+
+def learning_record(q: dict, job: dict, why: str) -> dict:
+    return {
+        "normalized_question": normalize_question(q.get("label") or ""),
+        "original_question": q.get("label") or "",
+        "company": job.get("company", ""), "role": job.get("title", ""),
+        "url": job.get("url", ""), "field_type": q.get("kind", ""),
+        "options": q.get("values") or [], "reason": why, "count": 1,
+    }
+
+
+def add_learning(path: Path, records: list) -> int:
+    """Merge records into the learning queue by normalized question; returns new count."""
+    import datetime
+    data = json.loads(path.read_text()) if path.exists() else []
+    index = {d["normalized_question"]: d for d in data}
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    added = 0
+    for r in records:
+        k = r["normalized_question"]
+        if k in index:
+            index[k]["count"] += 1
+            index[k].setdefault("seen_at", []).append({"company": r["company"], "url": r["url"]})
+        else:
+            r["first_seen"] = now
+            r["seen_at"] = [{"company": r["company"], "url": r["url"]}]
+            data.append(r); index[k] = r; added += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=1))
+    return added
+
+
 # ------------------------------------------------------------- classification
 
 
@@ -159,7 +271,8 @@ def _bank_get(bank: dict, section: str, key: str):
 
 
 def pick_option(label: str, values: list[str], bank: dict):
-    """Choose an option for a select/radio by the enum_map, then by known facts."""
+    """Choose an option for a select/radio: enum_map preference list first (explicit
+    aliases), then a known fact matched exactly or by listed alias. Never a guess."""
     lab = label.lower()
     for pat, prefs in (bank.get("enum_map") or {}).items():
         if re.search(pat, lab, re.I):
@@ -167,14 +280,11 @@ def pick_option(label: str, values: list[str], bank: dict):
                 for v in values:
                     if pref.lower() == v.lower() or pref.lower() in v.lower():
                         return v
-    # A known yes/no fact answered through a select.
     for pat, (section, key) in KNOWN_PATTERNS:
         if re.search(pat, lab, re.I):
             want = _bank_get(bank, section, key)
             if want:
-                for v in values:
-                    if v.lower() == want.lower() or v.lower().startswith(want.lower()[:3]):
-                        return v
+                return match_option(want, values, sensitive=True)
     return None
 
 
@@ -203,15 +313,22 @@ def classify(q: dict, bank: dict):
             if re.search(pat, lab):
                 want = eeo.get(k)
                 if want and values:
-                    for v in values:
-                        if v.lower() == want.lower() or want.lower()[:8] in v.lower():
-                            return "EEO", v
+                    v = match_option(want, values, sensitive=True)
+                    if v:
+                        return "EEO", v
                     for v in values:  # decline option, always acceptable for voluntary fields
-                        if re.search(r"decline|prefer not|do not wish", v, re.I):
+                        if re.search(r"decline|prefer not|do not wish|don't wish|choose not", v, re.I):
                             return "EEO", v
                     return "EEO", None
                 return "EEO", want
         return "EEO", None
+
+    learned = learned_lookup(q, bank)
+    if learned:
+        if values:
+            v = match_option(str(learned.get("value", "")), values, sensitive=True)
+            return ("LEARNED", v) if v else ("ENUM_UNMATCHED", None)
+        return "LEARNED", learned.get("value")
 
     if kind in ("select", "multiselect", "radio", "checkboxgroup") and values:
         v = pick_option(q.get("label") or "", values, bank)
@@ -243,7 +360,7 @@ def plan_form(questions: list[dict], bank: dict) -> dict:
         cls, value = classify(q, bank)
         q = dict(q, cls=cls, value=value)
         req = q.get("required")
-        if cls in ("KNOWN", "ENUM", "FILE_RESUME") or (cls == "EEO" and value):
+        if cls in ("KNOWN", "ENUM", "LEARNED", "FILE_RESUME") or (cls == "EEO" and value):
             fill.append(q)
         elif cls == "EEO":
             optional_skips.append(q)  # voluntary, left blank
@@ -259,8 +376,9 @@ def plan_form(questions: list[dict], bank: dict) -> dict:
                                  "UNKNOWN": "required field the bank cannot answer"}.get(cls, cls)))
         else:
             optional_skips.append(q)
+    learnable = [(q, why) for q, why in blockers if q.get("cls") in ("UNKNOWN", "ENUM_UNMATCHED")]
     return {"fill": fill, "free_short": free_short, "blockers": blockers,
-            "optional_skips": optional_skips}
+            "optional_skips": optional_skips, "learnable": learnable}
 
 
 def describe(plan: dict) -> str:

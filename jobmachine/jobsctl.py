@@ -1118,7 +1118,7 @@ def cmd_queue(args):
         if key in state["rejected"]:
             skipped["rejected"] += 1
             continue
-        if key in manual_state and not args.retry_manual:
+        if key in manual_state and not args.retry_manual and key not in state.get("requeue", []):
             skipped["manual_already"] += 1
             continue
         if recent[company.lower()] >= COMPANY_CAP:
@@ -1137,6 +1137,10 @@ def cmd_queue(args):
             reasons = [f"{q['label'][:60]}: {why}" for q, why in plan["blockers"]]
             manual.append((r, reasons))
             manual_state[key] = {"at": now_iso(), "reasons": reasons}
+            learn = [forms.learning_record(q, {"company": company, "title": r["title"], "url": r["url"]}, why)
+                     for q, why in plan.get("learnable", [])]
+            if learn:
+                forms.add_learning(PRIVATE / "learning-queue.json", learn)
             continue
         out.append({
             "key": key, "source": source, "slug": slug, "job_id": job_id,
@@ -1151,6 +1155,7 @@ def cmd_queue(args):
         if len(out) >= args.cap:
             break
 
+    state["requeue"] = [k for k in state.get("requeue", []) if k not in {q["key"] for q in out}]
     QUEUE_FILE.write_text(json.dumps(out, indent=1))
     if manual:
         MANUAL_QUEUE.parent.mkdir(parents=True, exist_ok=True)
@@ -1268,6 +1273,63 @@ def cmd_slugs_merge(args):
     print(f"slugs-merge: +{added} boards (now {len(slugs)}) -> {SLUGS_FILE}")
 
 
+
+def cmd_learn(args):
+    """The learning interview. No flags: print deduplicated unknown questions.
+    --answer "N=value" (N from the printout) or "normalized question=value":
+    promote into answers.json["learned"] and release manual-queue jobs whose
+    blockers were only these questions, so the next `queue` re-evaluates them."""
+    import forms
+    lq = PRIVATE / "learning-queue.json"
+    items = json.loads(lq.read_text()) if lq.exists() else []
+    if not items:
+        print("learning queue is empty")
+        return
+    items.sort(key=lambda d: -d.get("count", 1))
+    if not args.answer:
+        print(f"{len(items)} unknown question(s). Answer with: jobsctl.py learn --answer \"N=value\"")
+        for i, d in enumerate(items, 1):
+            opts = f"  options: {d['options'][:8]}" if d.get("options") else ""
+            print(f"{i:3d}. [{d.get('count',1)}x] {d['original_question'][:90]}{opts}")
+            print(f"      e.g. {d.get('company','')} / {d.get('role','')[:40]}")
+        return
+    bank = forms.load_bank()
+    learned = bank.setdefault("learned", [])
+    state = _load_state()
+    promoted = 0
+    for spec in args.answer:
+        key, _, value = spec.partition("=")
+        key, value = key.strip(), value.strip()
+        if not value:
+            print(f"! no value in {spec!r}"); continue
+        target = None
+        if key.isdigit() and 1 <= int(key) <= len(items):
+            target = items[int(key) - 1]
+        else:
+            nk = forms.normalize_question(key)
+            target = next((d for d in items if d["normalized_question"] == nk), None)
+        if target is None:
+            print(f"! no learning item matches {key!r}"); continue
+        toks = [t for t in target["normalized_question"].split() if len(t) > 2][:6]
+        pattern = r".*".join(re.escape(t) for t in toks) if toks else re.escape(target["original_question"])
+        learned.append({"normalized": target["normalized_question"], "patterns": [pattern],
+                        "value": value, "original": target["original_question"],
+                        "learned_at": now_iso()})
+        items.remove(target)
+        promoted += 1
+        # release manual-queue jobs that were blocked (at least in part) by this question
+        for k, m in list(state.get("manual", {}).items()):
+            if any(target["original_question"][:40].lower() in r.lower() for r in m.get("reasons", [])):
+                state["manual"].pop(k, None)
+                state.setdefault("requeue", []).append(k)
+        print(f"learned: {target['original_question'][:70]!r} -> {value!r}")
+    (PRIVATE / "answers.json").write_text(json.dumps(bank, indent=1) + "\n")
+    lq.write_text(json.dumps(items, indent=1))
+    save_json(STATE_FILE, state)
+    print(f"promoted {promoted}; {len(items)} still unknown; "
+          f"{len(state.get('requeue', []))} job(s) released for re-queue (run: jobsctl.py queue)")
+
+
 # ----------------------------------------------------------------------- main
 
 
@@ -1354,6 +1416,10 @@ def main() -> None:
     sm = sub.add_parser("slugs-merge", help="merge expand-batch json into data/slugs.json")
     sm.add_argument("file")
     sm.set_defaults(fn=cmd_slugs_merge)
+
+    ln = sub.add_parser("learn", help="unknown-question interview; --answer N=value promotes + requeues")
+    ln.add_argument("--answer", action="append", help='"N=value" or "normalized question=value"; repeatable')
+    ln.set_defaults(fn=cmd_learn)
 
     pa = sub.add_parser("pause")
     pa.add_argument("reason", nargs="?")
