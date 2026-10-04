@@ -77,6 +77,8 @@ FIELD_HARVEST_JS = r"""
   for (const el of els) {
     const type = (el.getAttribute('type') || el.tagName).toLowerCase();
     if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type)) continue;
+    if (/requiredInput/i.test(el.className || '')) continue;
+    if (!el.id && !(el.getAttribute('name') || '') && !el.getAttribute('aria-label')) continue;
     if (el.closest('[aria-hidden="true"]')) continue;
     const name = el.getAttribute('name') || '';
     if (type === 'radio' || type === 'checkbox') {
@@ -104,15 +106,21 @@ FIELD_HARVEST_JS = r"""
     }
     const tag = el.tagName.toLowerCase();
     let kind = type === 'file' ? 'file' : tag === 'select' ? 'select' : tag === 'textarea' ? 'textarea'
-             : (el.getAttribute('role') === 'combobox' ? 'combobox' : 'text');
+             : ((el.getAttribute('role') === 'combobox' || el.getAttribute('aria-autocomplete') === 'list') ? 'combobox' : 'text');
     let values = [];
     if (kind === 'select') values = [...el.options].map(o => txt(o.textContent)).filter(v => v && !/^(select|choose|--|please)/i.test(v));
-    const lab = labelOf(el);
+    let lab = labelOf(el);
+    if (kind === 'file') {
+      const hint = (el.id + ' ' + name + ' ' + lab).toLowerCase();
+      if (/resume|\bcv\b/.test(hint)) lab = 'Resume/CV';
+      else if (/cover/.test(hint)) lab = 'Cover Letter';
+    }
     const sel = el.id ? '#' + CSS.escape(el.id) : (name ? `${tag}[name="${name}"]` : null);
     if (!sel) continue;
     if (seen.has(sel)) continue; seen.add(sel);
     out.push({ sel, kind, label: lab, name,
-               required: !!(el.required || el.getAttribute('aria-required') === 'true' || /\*/.test(lab)),
+               required: !!(el.required || el.getAttribute('aria-required') === 'true' || /\*/.test(lab)
+                           || ['country', 'candidate-location', 'phone'].includes(el.id) || lab === 'Resume/CV'),
                values });
   }
   return out;
@@ -160,7 +168,8 @@ def chromium_path():
     if os.environ.get("CHROMIUM_PATH"):
         return os.environ["CHROMIUM_PATH"]
     base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
-    for pat in ("chromium-*/chrome-linux*/chrome", "chromium_headless_shell-*/chrome-linux*/headless_shell", "chromium/chrome"):
+    for pat in ("chromium-*/chrome-linux*/chrome", "chromium_headless_shell-*/chrome-linux*/headless_shell",
+                "chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell", "chromium/chrome"):
         hits = sorted(glob.glob(os.path.join(base, pat)))
         if hits:
             return hits[-1]
@@ -226,36 +235,93 @@ def detect_captcha(page) -> bool:
     return False
 
 
+_DIAL_RE = re.compile(r"\s*\+\d[\d\s-]*$")
+_MENU_NOISE = re.compile(r"^(no options|loading|type to search|start typing)", re.I)
+
+
+def _opt_norm(t: str) -> str:
+    return forms._norm(_DIAL_RE.sub("", t or ""))
+
+
+def _combo_optsel(page, sel) -> str:
+    """Option locator for an open react-select / ARIA combobox: its own listbox only."""
+    try:
+        ctl = page.locator(sel).first.get_attribute("aria-controls")
+        if ctl:
+            return f"#{ctl} [role=option]"
+    except Exception:  # noqa: BLE001
+        pass
+    return "[role=option]:visible"
+
+
+def _combo_texts(page, sel, wait_ms=3000) -> tuple[str, list[str]]:
+    optsel = _combo_optsel(page, sel)
+    waited = 0
+    while waited < wait_ms:
+        texts = [t.strip() for t in page.locator(optsel).all_inner_texts()]
+        texts = [t for t in texts if t and not _MENU_NOISE.match(t)]
+        if texts:
+            return optsel, texts
+        page.wait_for_timeout(250)
+        waited += 250
+        optsel = _combo_optsel(page, sel)
+    return optsel, []
+
+
 def combobox_options(page, sel) -> list[str]:
     try:
-        page.click(sel, timeout=3000)
+        page.locator(sel).first.click(timeout=3000)
         page.wait_for_timeout(400)
-        opts = page.locator("[role=option]")
-        vals = [t.strip() for t in opts.all_inner_texts() if t.strip()]
+        _, texts = _combo_texts(page, sel, wait_ms=1500)
         page.keyboard.press("Escape")
-        return vals[:60]
+        return [_DIAL_RE.sub("", t).strip() for t in texts][:400]
     except Exception:  # noqa: BLE001
         return []
+
+
+def fill_combobox(page, q, value):
+    inp = page.locator(q["sel"]).first
+    inp.click()
+    page.wait_for_timeout(400)
+    optsel, texts = _combo_texts(page, q["sel"], wait_ms=1200)
+    is_loc = bool(re.search(r"location|city", q.get("label", ""), re.I))
+    if not texts or len(texts) > 25:
+        # Geocoder-backed location selects want the bare city; everything else the full value.
+        inp.press_sequentially((value.split(",")[0].strip() if is_loc else value)[:40], delay=15)
+        optsel, texts = _combo_texts(page, q["sel"], wait_ms=4000)
+    want = forms._norm(value)
+    idx = next((i for i, t in enumerate(texts) if _opt_norm(t) == want), None)
+    if idx is None and is_loc and want:
+        toks = want.split(" ")
+        cands = [i for i, t in enumerate(texts) if _opt_norm(t).startswith(toks[0])]
+        rest = set(toks[1:])
+        for k, al in forms._ALIASES.items():
+            if rest & al:
+                rest |= {k}
+        pref = [i for i in cands if rest & set(_opt_norm(texts[i]).split(" "))]
+        idx = (pref or cands or [None])[0]
+    if idx is None:
+        page.keyboard.press("Escape")
+        raise RuntimeError(f"no option matching {value!r} (saw {texts[:5]})")
+    page.locator(optsel).nth(idx).click(force=True)
+    page.wait_for_timeout(300)
+    chosen = inp.evaluate("el => { const c = el.closest('[class*=control]'); const sv = c && c.querySelector('[class*=single-value]'); return sv ? sv.innerText : '' }")
+    if not chosen:
+        raise RuntimeError(f"combobox selection not registered for {value!r}")
 
 
 def fill_field(page, q, value, resume: Path):
     sel, kind = q["sel"], q["kind"]
     if kind == "file":
         page.set_input_files(sel, str(resume))
+        page.wait_for_timeout(2500)  # let the async upload finish before submit
         page.wait_for_timeout(2500)
     elif kind in ("text", "textarea"):
         page.fill(sel, value)
     elif kind == "select":
         page.select_option(sel, label=value)
     elif kind == "combobox":
-        page.click(sel)
-        page.fill(sel, value)
-        page.wait_for_timeout(600)
-        opt = page.locator("[role=option]", has_text=value).first
-        if opt.count():
-            opt.click()
-        else:
-            page.keyboard.press("Enter")
+        fill_combobox(page, q, value)
     elif kind in ("radio", "checkboxgroup"):
         idx = q["values"].index(value)
         page.locator(sel).nth(idx).check(force=True)
@@ -314,6 +380,16 @@ def run_job(pw_browser, job, bank, shadow: bool, resume: Path) -> dict:
                         continue
             resolved_blockers.append((q, why))
         plan["blockers"] = resolved_blockers
+        # Optional comboboxes (EEO, country) also need their options opened before
+        # the bank can match a value; fill them when it can, leave blank otherwise.
+        for q in plan.get("optional_skips", []):
+            if q["kind"] == "combobox" and not any(f["sel"] == q["sel"] for f in plan["fill"]):
+                vals = combobox_options(page, q["sel"])
+                if vals:
+                    q2 = dict(q, values=vals, kind="select")
+                    cls, value = forms.classify(q2, bank)
+                    if value:
+                        plan["fill"].append(dict(q2, kind="combobox", cls=cls, value=value))
 
         for q in plan["free_short"]:
             text = _match_answer(q["label"], answers)
@@ -365,9 +441,29 @@ def run_job(pw_browser, job, bank, shadow: bool, resume: Path) -> dict:
         if not btn.count():
             res.update(outcome="failed", reason="no submit button")
             return res
+        net, console = [], []
+        def _on_resp(r):
+            try:
+                if r.request.method != "GET" or r.status >= 400:
+                    body = ""
+                    try:
+                        body = r.text()[:300]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    net.append(f"{r.request.method} {r.status} {r.url[:120]} {body}")
+            except Exception:  # noqa: BLE001
+                pass
+        def _on_console(m):
+            if m.type in ("error", "warning"):
+                console.append(m.text[:160])
+        def _on_fail(req):
+            net.append(f"FAILED {req.method} {req.url[:120]} {req.failure}")
+        page.on("response", _on_resp)
+        page.on("console", _on_console)
+        page.on("requestfailed", _on_fail)
         btn.click()
 
-        deadline = time.time() + 25
+        deadline = time.time() + 60
         body = ""
         while time.time() < deadline:
             page.wait_for_timeout(1500)
@@ -383,9 +479,29 @@ def run_job(pw_browser, job, bank, shadow: bool, resume: Path) -> dict:
         post = SHOTS / f"submitted-{tag}.png"
         page.screenshot(path=str(post), full_page=True)
         res["shot_after"] = str(post)
+        res["post_url"] = page.url
+        res["post_net"] = net[:15]
+        res["post_console"] = console[:10]
+        res["post_text"] = re.sub(r"\s+", " ", body)[:900]
+        try:
+            res["post_diag"] = page.evaluate("""() => {
+              const lab = el => { const l = el.getAttribute('aria-labelledby'); const n = l && document.getElementById(l); return (n ? n.innerText : (el.labels && el.labels[0] ? el.labels[0].innerText : el.id || el.name || '')).trim().slice(0, 50); };
+              return {
+                invalid: [...document.querySelectorAll('[aria-invalid="true"]')].map(lab),
+                errors: [...document.querySelectorAll('[class*="error" i], [class*="invalid" i], [role=alert], [role=status], [id$="-error"]')].map(e => (e.innerText || '').trim().slice(0, 80)).filter(Boolean).slice(0, 12),
+                files: [...document.querySelectorAll('input[type=file]')].map(f => f.id + ':' + (f.files && f.files.length ? f.files[0].name + ':' + f.files[0].size : 'none')),
+                submitDisabled: [...document.querySelectorAll('button')].filter(b => /submit/i.test(b.innerText)).map(b => b.disabled + ':' + (b.getAttribute('aria-disabled') || '')),
+              }; }""")
+        except Exception as e:  # noqa: BLE001
+            res["post_diag"] = f"diag error {e}"[:200]
         if CONFIRM_RE.search(body) or re.search(r"confirmation|thank", page.url, re.I):
             res.update(outcome="submitted", reason="confirmation text seen")
             mark_applied(key, job)
+        elif any("captcha-failed" in n or " 428 " in n for n in net):
+            # Greenhouse rejected the invisible reCAPTCHA score and emailed a security
+            # code instead. That is a captcha gate: never solved here, manual queue.
+            res.update(outcome="captcha", reason="greenhouse captcha-failed (428) on submit; security code emailed to applicant")
+            to_manual(job, ["captcha-failed on submit (reCAPTCHA Enterprise score); needs a real browser session"])
         else:
             msgs = []
             try:
@@ -422,7 +538,7 @@ def main():
     resumes = {m: resume_for(m) for m in {j["master"] for j in queue}}
 
     from playwright.sync_api import sync_playwright
-    launch = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+    launch = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-extensions", "--renderer-process-limit=1", "--disable-background-networking", "--js-flags=--max-old-space-size=160"]}
     exe = chromium_path()
     if exe:
         launch["executable_path"] = exe
